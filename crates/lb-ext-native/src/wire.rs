@@ -1,53 +1,75 @@
-//! The request/response shapes on the stdio wire.
+//! The child control-wire shapes — the exact request/reply the host (`lb-supervisor`) and a native
+//! extension exchange over the framed line. A small, closed method set: `init` (handshake), `health`
+//! (liveness poll), `call` (dispatch a tool), `shutdown` (cooperative drain). JSON over
+//! `Content-Length` framing (see [`crate::frame`]).
 //!
-//! JSON in / JSON out, mirroring the WASM tier's `tool.call` exactly (the obvious dual). Richer typed
-//! records are deliberately avoided so the boundary stays stable while individual tool schemas evolve
-//! — the schemas are validated host-side, never baked into this ABI.
+//! These types are the **child mirror** of lb's `lb-supervisor::rpc` — they must stay byte-for-byte
+//! serde-compatible with the host side, because they *are* the wire. The host sends [`Request`]; the
+//! child replies [`Reply`]. Method-specific arguments ride `params` as an opaque JSON string (the
+//! same opaque-JSON ABI the wasm tier uses — richer schemas stay host-side), so this control surface
+//! stays tiny and stable while individual tool schemas evolve.
 
 use serde::{Deserialize, Serialize};
 
-/// A tool dispatch from host to child: invoke `name` with `input_json`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// A request from the host to the child. `id` correlates the reply; `method` is the verb.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Request {
-    pub name: String,
-    pub input_json: String,
+    pub id: u64,
+    pub method: Method,
+    /// Method-specific arguments as a raw JSON string. Empty for `init`/`health`/`shutdown`.
+    #[serde(default)]
+    pub params: String,
 }
 
-/// The child's reply: the tool's JSON output, or a [`ToolError`].
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Response {
-    Ok { output_json: String },
-    Err { error: ToolError },
+/// The closed set of control methods. A new method is a deliberate protocol change (bump
+/// [`crate::PROTOCOL_MAJOR`]), never an ad-hoc string.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Method {
+    /// Handshake: the host asks the child to confirm it is ready. Sent once, right after spawn.
+    Init,
+    /// Liveness poll: the child must reply within the host's health window or be treated as dead.
+    Health,
+    /// Dispatch a tool: `params` carries a [`CallParams`] JSON.
+    Call,
+    /// Cooperative shutdown: the child should drain and exit; the host escalates to a kill after grace.
+    Shutdown,
 }
 
-/// The tool error shape — kept identical to the WASM world's `tool-error` variant so a tool behaves
-/// the same whichever tier hosts it.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ToolError {
-    /// The input JSON was malformed or failed the tool's contract.
-    BadInput(String),
-    /// The tool ran but failed.
-    Failed(String),
+/// A reply from the child, correlated by `id`. Exactly one of `result`/`error` is set.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Reply {
+    pub id: u64,
+    /// The success payload (a raw JSON string), present when the call succeeded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<String>,
+    /// The error message, present when the call failed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
-impl Response {
-    pub fn ok(output_json: impl Into<String>) -> Self {
-        Self::Ok {
-            output_json: output_json.into(),
+impl Reply {
+    pub fn ok(id: u64, result: impl Into<String>) -> Self {
+        Self {
+            id,
+            result: Some(result.into()),
+            error: None,
         }
     }
-    pub fn failed(msg: impl Into<String>) -> Self {
-        Self::Err {
-            error: ToolError::Failed(msg.into()),
+    pub fn err(id: u64, error: impl Into<String>) -> Self {
+        Self {
+            id,
+            result: None,
+            error: Some(error.into()),
         }
     }
-    pub fn bad_input(msg: impl Into<String>) -> Self {
-        Self::Err {
-            error: ToolError::BadInput(msg.into()),
-        }
-    }
+}
+
+/// The `params` shape for a [`Method::Call`]: which tool and its opaque-JSON input.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CallParams {
+    pub tool: String,
+    pub input: String,
 }
 
 #[cfg(test)]
@@ -57,18 +79,38 @@ mod tests {
     #[test]
     fn request_round_trips() {
         let req = Request {
-            name: "series.read".into(),
-            input_json: r#"{"id":1}"#.into(),
+            id: 7,
+            method: Method::Call,
+            params: r#"{"tool":"series.read","input":"{}"}"#.into(),
         };
         let back: Request = serde_json::from_str(&serde_json::to_string(&req).unwrap()).unwrap();
-        assert_eq!(back.name, "series.read");
+        assert_eq!(back, req);
     }
 
     #[test]
-    fn ok_and_error_responses_tag_distinctly() {
-        let ok = serde_json::to_string(&Response::ok("[]")).unwrap();
-        assert!(ok.contains("\"ok\""));
-        let err = serde_json::to_string(&Response::failed("boom")).unwrap();
-        assert!(err.contains("\"err\"") && err.contains("failed"));
+    fn method_serializes_lowercase() {
+        assert_eq!(serde_json::to_string(&Method::Init).unwrap(), "\"init\"");
+        assert_eq!(
+            serde_json::to_string(&Method::Shutdown).unwrap(),
+            "\"shutdown\""
+        );
+    }
+
+    #[test]
+    fn reply_ok_and_err_are_exclusive() {
+        let ok = Reply::ok(1, "[]");
+        assert!(ok.result.is_some() && ok.error.is_none());
+        let err = Reply::err(1, "boom");
+        assert!(err.result.is_none() && err.error.as_deref() == Some("boom"));
+    }
+
+    #[test]
+    fn call_params_round_trip() {
+        let p = CallParams {
+            tool: "ingest.write".into(),
+            input: r#"{"n":1}"#.into(),
+        };
+        let back: CallParams = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
+        assert_eq!(back, p);
     }
 }

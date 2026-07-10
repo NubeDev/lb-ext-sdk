@@ -1,34 +1,38 @@
-//! The `init` handshake and its protocol-version gate.
+//! The `init` handshake payload and its protocol-version gate.
 //!
 //! This is the native-tier analogue of `lb_sdk::WORLD_MAJOR`. WASM guests are refused at load on a
-//! world-major mismatch; before this crate existed the native `init` handshake carried no version at
-//! all, so once a native extension pins a *published* `lb-ext-native`, host/child ABI drift became
-//! possible and silent. The handshake now carries an explicit protocol major: the host reads it at
-//! `init` and refuses a child whose major differs, exactly as loudly as a world mismatch.
+//! world-major mismatch; the native `init` handshake carries the same protection so that once a
+//! native extension pins a *published* `lb-ext-native`, host/child ABI drift is caught, not silent.
+//!
+//! On the wire (see [`crate::wire`]) the host sends `Request{method: Init}` and the child replies
+//! with an [`InitReply`] JSON as the reply `result`: the protocol major it was built against plus the
+//! tools it is prepared to serve. The host compares the major against its own and refuses a mismatch
+//! exactly as loudly as a `world` mismatch.
 
 use serde::{Deserialize, Serialize};
 
 /// Major version of the native sidecar wire protocol. Bumping this breaks every native extension
 /// built against an older `lb-ext-native` — a deliberate, rare act, mirroring `lb_sdk::WORLD_MAJOR`.
-/// The child announces it in [`Init`]; the host compares against its own and refuses a mismatch.
+/// The child announces it in [`InitReply`]; the host compares against its own and refuses a mismatch.
 pub const PROTOCOL_MAJOR: u64 = 0;
 
-/// The child's opening message on spawn: who it is and which wire major it speaks. The host verifies
-/// `protocol_major == its own` before dispatching a single `call`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Init {
-    /// The extension id (must match the installed manifest's id).
-    pub ext_id: String,
+/// The child's reply to the host's `init` request: the wire major it speaks and the tools it serves.
+/// Serialized to JSON and returned as the `init` reply's `result` string.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InitReply {
     /// The wire protocol major this child was built against — [`PROTOCOL_MAJOR`].
     pub protocol_major: u64,
+    /// The tools this child implements, so the host can reject a dispatch for an unknown tool early.
+    #[serde(default)]
+    pub tools: Vec<String>,
 }
 
-impl Init {
-    /// Build the child's `init` for `ext_id`, stamping the compiled-in [`PROTOCOL_MAJOR`].
-    pub fn new(ext_id: impl Into<String>) -> Self {
+impl InitReply {
+    /// Build the child's `init` reply, stamping the compiled-in [`PROTOCOL_MAJOR`].
+    pub fn new(tools: impl IntoIterator<Item = String>) -> Self {
         Self {
-            ext_id: ext_id.into(),
             protocol_major: PROTOCOL_MAJOR,
+            tools: tools.into_iter().collect(),
         }
     }
 
@@ -39,44 +43,27 @@ impl Init {
     }
 }
 
-/// The host's reply to a compatible [`Init`]: the tools the child is granted, so it can reject a
-/// dispatch for a tool outside its grant without a round-trip.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct InitResult {
-    pub granted_tools: Vec<String>,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn init_stamps_current_major() {
-        assert_eq!(Init::new("cooler-panel").protocol_major, PROTOCOL_MAJOR);
+        assert_eq!(InitReply::new([]).protocol_major, PROTOCOL_MAJOR);
     }
 
     #[test]
     fn compatible_only_on_equal_major() {
-        let init = Init::new("cooler-panel");
+        let init = InitReply::new([]);
         assert!(init.compatible_with(PROTOCOL_MAJOR));
         assert!(!init.compatible_with(PROTOCOL_MAJOR + 1));
     }
 
     #[test]
-    fn init_result_round_trips_json() {
-        let res = InitResult {
-            granted_tools: vec!["series.read".into(), "ingest.write".into()],
-        };
-        let back: InitResult = serde_json::from_str(&serde_json::to_string(&res).unwrap()).unwrap();
-        assert_eq!(back.granted_tools.len(), 2);
-    }
-
-    #[test]
-    fn init_round_trips_json() {
-        let init = Init::new("cooler-panel");
-        let json = serde_json::to_string(&init).unwrap();
-        let back: Init = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.ext_id, "cooler-panel");
-        assert_eq!(back.protocol_major, PROTOCOL_MAJOR);
+    fn init_reply_round_trips_json() {
+        let res = InitReply::new(["series.read".into(), "ingest.write".into()]);
+        let back: InitReply = serde_json::from_str(&serde_json::to_string(&res).unwrap()).unwrap();
+        assert_eq!(back, res);
+        assert_eq!(back.tools.len(), 2);
     }
 }

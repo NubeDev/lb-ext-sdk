@@ -22,3 +22,4 @@ lb-sdk = { path = "crates/lb-sdk", version = "0.2.0" }
 lb-ext-native = { path = "crates/lb-ext-native", version = "0.2.0" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+tokio = { version = "1", default-features = false }
