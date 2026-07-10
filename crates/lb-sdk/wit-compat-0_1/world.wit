@@ -1,0 +1,28 @@
+// ABI back-compat shim for `@0.1.0` guests (host-callback scope, the @0.2.0 minor bump).
+//
+// wasmtime's component linker treats a `0.x` MINOR difference as semver-INCOMPATIBLE (per Cargo
+// semver, `0.1` and `0.2` are breaking). So a guest that imports `lazybones:ext/host@0.1.0` (only
+// `log`) is NOT satisfied by the host's `@0.2.0` `host` instance — it would fail to instantiate.
+// To honor "existing 0.1.0 guests keep loading" (the scope's load-bearing ABI-compat promise), the
+// host ALSO registers this verbatim `@0.1.0` `host` interface (just `log`) in the linker. New guests
+// resolve `@0.2.0`; old guests resolve this `@0.1.0`. The host major is still 0 — no guest is broken.
+//
+// This is the EXACT original 0.1.0 `host` interface. It must never change (a frozen snapshot).
+package lazybones:ext@0.1.0;
+
+interface tool {
+    variant tool-error {
+        bad-input(string),
+        failed(string),
+    }
+    call: func(name: string, input-json: string) -> result<string, tool-error>;
+}
+
+interface host {
+    log: func(message: string);
+}
+
+world extension {
+    import host;
+    export tool;
+}

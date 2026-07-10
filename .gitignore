@@ -1,0 +1,6 @@
+/target
+**/*.rs.bk
+Cargo.lock
+
+# Machine-specific linker wiring (zigcc, etc.) — never committed; each dev/CI provides its own.
+/.cargo/config.toml

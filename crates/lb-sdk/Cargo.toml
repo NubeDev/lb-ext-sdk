@@ -1,0 +1,14 @@
+# The SDK crate — the STABLE boundary. Holds the WIT contract (wit/) and the constants that
+# pin its version. Extension authors (guests) generate bindings from this WIT via wit-bindgen;
+# the host (in lb) generates its side via wasmtime bindgen. One WIT, two generated sides — the
+# contract cannot drift (lb crate-layout scope).
+[package]
+name = "lb-sdk"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "The stable Lazybones extension ABI: the WIT world and its version gate."
+
+[dependencies]

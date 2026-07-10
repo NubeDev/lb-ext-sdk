@@ -1,0 +1,19 @@
+# lb-ext-native — the native (Tier-2) extension SDK: the child-side of the sidecar wire.
+#
+# A native extension is a subprocess the host supervises over stdio. This crate is the ONLY
+# thing such an extension imports from the platform — it re-exports the child face of the wire
+# protocol (init/health/call/shutdown), the host-callback client, and the token self-check.
+# It deliberately does NOT expose the host-side supervision machinery (that stays in lb's
+# lb-supervisor): freezing host internals as public API is exactly what this facade avoids.
+[package]
+name = "lb-ext-native"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "The child-side wire protocol + host callback for native Lazybones extensions."
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true

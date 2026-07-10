@@ -1,0 +1,54 @@
+// The STABLE plugin ABI (README §11.2, crate-layout scope: the SDK/WIT boundary decision).
+//
+// This is the forever contract. Breaking the world's exported/imported signatures is a major
+// version bump; the loader refuses a component whose world major doesn't match the host.
+// Keep this surface as SMALL as possible — an extension is a bundle of MCP tools (README
+// §6.5, §7), so the guest export is one tool-dispatch entry point and nothing more.
+//
+// @0.2.0 (minor bump, world MAJOR unchanged = 0) adds ONE import: `host.call-tool`, the
+// host-mediated call-back that lets a guest reach the SAME MCP tool surface the page bridge
+// reaches (`POST /mcp/call` -> `lb_host::call_tool`), under its delegated `caller ∩ grant`
+// authority — capability- and workspace-checked host-side on every call (host-callback scope).
+// Because world major is unchanged, existing `@0.1.0` guests keep loading (they simply never
+// import the new function); a guest that USES the callback declares `@0.2.0`.
+package lazybones:ext@0.2.0;
+
+interface tool {
+    // A tool call: JSON input string -> JSON output string, or a tool error.
+    // JSON (not richer WIT records) keeps the boundary stable while tool schemas evolve;
+    // the schemas are validated host-side (mcp scope), not baked into the ABI.
+    variant tool-error {
+        bad-input(string),
+        failed(string),
+    }
+    call: func(name: string, input-json: string) -> result<string, tool-error>;
+}
+
+// The host functions a guest MAY call. Each is capability-gated HOST-SIDE before it does
+// anything (auth-caps scope) — importing the function does not grant the capability.
+interface host {
+    // Reuse the tool error shape so the callback mirrors `tool.call` exactly (the obvious dual).
+    use tool.{tool-error};
+
+    // Fire-and-forget audit log. Not an authorized tool call — kept separate from `call-tool`
+    // on purpose (host-callback scope, open question 4).
+    log: func(message: string);
+
+    // The host-mediated call-back: invoke ANY MCP tool the guest is granted — host-native
+    // (`series.*`, `ingest.write`, `outbox.status`, `inbox.list`/`resolve`) or another
+    // extension's `<ext>.<tool>` — and get its JSON output back, exactly as the page bridge's
+    // `bridge.call(tool, args)` does. JSON in / JSON out (the schemas stay host-side).
+    //
+    // Authorization is HOST-SIDE on every call: workspace-first, then `mcp:<tool>:call`, against
+    // the guest's EFFECTIVE principal = `caller ∩ install-grant` — so a guest can never reach a
+    // tool its install grant omitted (even if its caller holds it) nor one its caller lacks (even
+    // if the install requested it). The workspace is the host-set caller's, never guest-supplied.
+    // A re-entrant guest->host->guest chain is bounded by a host depth guard
+    // (`tool-error::failed("call depth exceeded")`).
+    call-tool: func(name: string, input-json: string) -> result<string, tool-error>;
+}
+
+world extension {
+    import host;
+    export tool;
+}

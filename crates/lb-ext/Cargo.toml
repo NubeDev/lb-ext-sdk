@@ -1,0 +1,20 @@
+# lb-ext — the developer CLI for Lazybones extensions.
+#
+# The out-of-tree replacement for `make publish-ext`: new / build / pack / publish, over the same
+# signed-Artifact path the in-shell Extension Studio uses. See lb's ext-out-of-tree-scope.md (the
+# `lb-ext` CLI) and ext-sdk-scope.md (the lb-devkit library it fronts).
+[package]
+name = "lb-ext"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "Developer CLI for Lazybones extensions: new, build, pack, publish."
+
+[[bin]]
+name = "lb-ext"
+path = "src/main.rs"
+
+[dependencies]
+lb-sdk.workspace = true

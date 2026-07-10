@@ -1,0 +1,24 @@
+# lb-ext-sdk — the authoritative Lazybones extension SDK (Rust).
+#
+# This repo OWNS the extension contract. `lb` (the platform) and every extension consume it;
+# nothing here depends on `lb`. See lb's docs/scope/extensions/ext-out-of-tree-scope.md.
+#
+#   - lb-sdk         the WASM tier: the WIT world + the version gate every guest targets.
+#   - lb-ext-native  the native (Tier-2) tier: the child-side wire protocol + host callback.
+#   - lb-ext         the developer CLI: new / build / pack / publish.
+[workspace]
+resolver = "2"
+members = ["crates/lb-sdk", "crates/lb-ext-native", "crates/lb-ext"]
+
+[workspace.package]
+version = "0.2.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+rust-version = "1.90"
+repository = "https://github.com/NubeDev/lb-ext-sdk"
+
+[workspace.dependencies]
+lb-sdk = { path = "crates/lb-sdk", version = "0.2.0" }
+lb-ext-native = { path = "crates/lb-ext-native", version = "0.2.0" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
