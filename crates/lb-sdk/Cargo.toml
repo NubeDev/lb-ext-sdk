@@ -10,5 +10,11 @@ license.workspace = true
 rust-version.workspace = true
 repository.workspace = true
 description = "The stable Lazybones extension ABI: the WIT world and its version gate."
+# `links` names the native/shared artifact this crate exposes: the WIT contract. It makes the crate's
+# `build.rs` metadata (the absolute WIT paths) available to direct dependents as `DEP_LB_SDK_WIT*`, so
+# a host/guest can locate the authoritative WIT without a sibling-path assumption. Also enforces a
+# single `lb-sdk` in the graph — the contract can't be linked twice.
+links = "lb-sdk"
+build = "build.rs"
 
 [dependencies]
