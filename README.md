@@ -10,7 +10,8 @@ these crates with **no access to the private `lb` repo**.
 | Crate | Tier | What it is |
 |---|---|---|
 | [`lb-sdk`](crates/lb-sdk) | WASM | The WIT world (`lazybones:ext`), `WORLD_MAJOR`, and the `world_major_matches` version gate every WASM guest targets. |
-| [`lb-ext-native`](crates/lb-ext-native) | native | The child side of the host↔sidecar wire: the `init` handshake (with `PROTOCOL_MAJOR`), the request/response shapes, and the host-callback client. A native extension imports only this — never the host's supervisor. |
+| [`lb-ext-native`](crates/lb-ext-native) | native | The child side of the host↔sidecar wire: the `init` handshake (with `PROTOCOL_MAJOR`), the request/response shapes, and (re-exported from `lb-sidecar-client`) the host-callback client. A native extension imports only this — never the host's supervisor. |
+| [`lb-sidecar-client`](crates/lb-sidecar-client) | native | The host-callback transport: `SidecarClient::from_env().call_tool(verb, args)` calls any host MCP verb the extension is granted, over an authenticated `POST /mcp/call`. Verb-agnostic; re-exported by `lb-ext-native`. |
 | [`lb-ext`](crates/lb-ext) | tool | The developer CLI: `new` / `build` / `pack` / `publish` — the out-of-tree replacement for `make publish-ext`. |
 
 ## The version gates
@@ -40,10 +41,23 @@ Until the first `sdk-v*` release lands on crates.io (published under `NubeDev`),
 tag:
 
 ```toml
-# a native extension
-lb-ext-native = { git = "https://github.com/NubeDev/lb-ext-sdk", tag = "sdk-v0.2.0" }
+# a native extension (the host-callback client rides along, re-exported)
+lb-ext-native = { git = "https://github.com/NubeDev/lb-ext-sdk", tag = "sdk-v0.3.0" }
 # a wasm extension
-lb-sdk        = { git = "https://github.com/NubeDev/lb-ext-sdk", tag = "sdk-v0.2.0" }
+lb-sdk        = { git = "https://github.com/NubeDev/lb-ext-sdk", tag = "sdk-v0.3.0" }
+```
+
+A native extension calls a host MCP verb back through the wire with the re-exported client —
+one dependency, both directions of the wire:
+
+```rust
+use lb_ext_native::{SidecarClient, CallError};
+use serde_json::json;
+
+let host = SidecarClient::from_env()?;            // reads the supervisor-injected identity
+let out = host.call_tool("authz.check_scoped",    // any verb the extension's grant includes
+    json!({ "cap": "mcp:widget.list:call", "table": "widget", "id": "widget:1" })).await?;
+// an ungranted verb → Err(CallError::Denied), never a panic
 ```
 
 ## Relationship to `lb`

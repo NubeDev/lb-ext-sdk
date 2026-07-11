@@ -1,0 +1,29 @@
+# lb-sidecar-client — the native (Tier-2) sidecar → host MCP callback transport.
+#
+# The out-of-process peer of the wasm guest's in-process `host.call-tool` bridge: a native
+# extension uses `SidecarClient::from_env().call_tool(tool, args)` to call ANY host MCP verb it is
+# granted, over an authenticated `POST /mcp/call` to the gateway. Verb-agnostic and product-agnostic
+# — the host's capability + workspace gate is the only thing that decides what a child may reach.
+#
+# This crate is the authoritative home of the callback client. It lived in the `lb` monorepo while
+# the wire stabilized; it now ships from the SDK so an OUT-OF-TREE native extension can consume it by
+# git tag (re-exported from `lb-ext-native` so a consumer carries one dependency). `lb` consumes it
+# back from here by the same git tag, so there is one source of truth. See lb's
+# docs/scope/extensions/native-callback-transport-scope.md and native-callback-sdk-export-scope.md.
+[package]
+name = "lb-sidecar-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "The native-sidecar host MCP callback client for Lazybones extensions."
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+reqwest.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "net", "io-util"] }

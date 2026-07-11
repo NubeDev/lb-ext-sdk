@@ -43,3 +43,13 @@ pub use handshake::{InitReply, PROTOCOL_MAJOR};
 pub use serve::{serve, Tools};
 pub use stdio::serve_stdio;
 pub use wire::{CallParams, Method, Reply, Request};
+
+/// The host-callback client — how a native extension calls BACK into the host's MCP surface.
+///
+/// The stdio wire above is host→child (the host dispatches tools *to* this extension). To call a host
+/// verb the *other* direction — `SidecarClient::from_env().call_tool("authz.check_scoped", args)` — an
+/// extension uses this re-exported [`lb_sidecar_client`] surface. It is verb-agnostic: the extension
+/// reaches whatever host verb its grant (`requested ∩ admin_approved`) includes; an ungranted call is
+/// a typed [`CallError::Denied`], never a panic. Re-exported here so a native extension depends only on
+/// `lb-ext-native` for both directions of the wire.
+pub use lb_sidecar_client::{self, CallError, Config, SidecarClient};
