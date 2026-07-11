@@ -137,7 +137,13 @@ mod tests {
             let body = read_frame(&mut host_r).await.unwrap();
             replies.push(serde_json::from_slice(&body).unwrap());
         }
-        drop(host_w); // EOF → server returns
+        // EOF → server returns. A `duplex` stays open until BOTH split halves of the host side are
+        // dropped: dropping only `host_w` leaves `host_r` holding the pipe open, so the child's
+        // `read_frame` never sees EOF and `server.await` hangs forever (only masked when a prior
+        // `shutdown` already ended the loop, or the process exits before the await is reached). Drop
+        // both halves so the write side genuinely closes and the child observes EOF.
+        drop(host_w);
+        drop(host_r);
         server.await.unwrap().unwrap();
         replies
     }

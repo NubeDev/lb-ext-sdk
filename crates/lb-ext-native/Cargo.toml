@@ -18,6 +18,9 @@ description = "The child-side wire protocol + host callback for native Lazybones
 serde.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["io-std", "io-util", "rt", "macros"] }
+# The host-callback client, re-exported so a native extension carries a single platform dependency
+# (the Cargo.toml doc + lib.rs already promise "the host-callback client" lives behind this facade).
+lb-sidecar-client.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["io-util", "rt", "macros", "rt-multi-thread"] }
