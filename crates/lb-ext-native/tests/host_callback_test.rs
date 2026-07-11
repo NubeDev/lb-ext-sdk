@@ -38,7 +38,10 @@ struct Captured {
 /// A REAL one-request HTTP/1.1 server that plays the gateway's `/mcp/call` endpoint. It reads the
 /// request, records what the client sent, and answers `status` with `resp_body`. Not a mock of the
 /// client — a genuine HTTP peer the real `reqwest` client talks to. Returns `(base_url, captured)`.
-async fn serve_once(status: u16, resp_body: &'static str) -> (String, Arc<tokio::sync::Mutex<Captured>>) {
+async fn serve_once(
+    status: u16,
+    resp_body: &'static str,
+) -> (String, Arc<tokio::sync::Mutex<Captured>>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().unwrap();
     let captured = Arc::new(tokio::sync::Mutex::new(Captured::default()));
@@ -64,7 +67,11 @@ async fn serve_once(status: u16, resp_body: &'static str) -> (String, Arc<tokio:
         let (head, body) = text.split_once("\r\n\r\n").unwrap_or((&text, ""));
         let mut lines = head.lines();
         let request_line = lines.next().unwrap_or_default();
-        let path = request_line.split_whitespace().nth(1).unwrap_or("").to_string();
+        let path = request_line
+            .split_whitespace()
+            .nth(1)
+            .unwrap_or("")
+            .to_string();
         let authorization = lines
             .find(|l| l.to_ascii_lowercase().starts_with("authorization:"))
             .map(|l| l.splitn(2, ':').nth(1).unwrap_or("").trim().to_string());
@@ -115,7 +122,11 @@ async fn call_tool_sends_the_gateway_wire_shape_and_decodes_the_result() {
         )
         .await
         .expect("granted callback round-trips");
-    assert_eq!(out, json!({ "allow": true }), "the JSON result is decoded verbatim");
+    assert_eq!(
+        out,
+        json!({ "allow": true }),
+        "the JSON result is decoded verbatim"
+    );
 
     // Assert the exact wire contract a native extension relies on: `POST /mcp/call`, bearer, `{tool,args}`.
     let c = captured.lock().await.clone();
@@ -125,13 +136,19 @@ async fn call_tool_sends_the_gateway_wire_shape_and_decodes_the_result() {
         Some("Bearer child-jwt-abc"),
         "authenticates with the injected child token, in the header (never the body)"
     );
-    assert_eq!(c.body["tool"], "authz.check_scoped", "the verb rides `tool`");
+    assert_eq!(
+        c.body["tool"], "authz.check_scoped",
+        "the verb rides `tool`"
+    );
     assert_eq!(
         c.body["args"]["id"], "widget:1",
         "the JSON args ride `args`, untouched"
     );
     // The workspace is NEVER in the body — the host derives it from the token (the hard wall, §7).
-    assert!(c.body.get("ws").is_none(), "workspace is not client-supplied");
+    assert!(
+        c.body.get("ws").is_none(),
+        "workspace is not client-supplied"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
@@ -141,7 +158,10 @@ async fn a_real_403_maps_to_the_distinct_denied_variant() {
     let client = SidecarClient::with_config(Config::new(&base, "ungranted-jwt", "acme", "care"));
 
     let err = client
-        .call_tool("authz.check_scoped", json!({ "cap": "mcp:widget.list:call" }))
+        .call_tool(
+            "authz.check_scoped",
+            json!({ "cap": "mcp:widget.list:call" }),
+        )
         .await
         .expect_err("an ungranted callback must be refused");
     // The one status a sidecar must distinguish gets its own variant — not `Http`, not `Transport`.
