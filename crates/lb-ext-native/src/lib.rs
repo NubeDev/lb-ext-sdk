@@ -42,7 +42,7 @@ pub mod wire;
 pub use handshake::{InitReply, PROTOCOL_MAJOR};
 pub use serve::{serve, Tools};
 pub use stdio::serve_stdio;
-pub use wire::{CallParams, Method, Reply, Request};
+pub use wire::{CallParams, Caller, Method, Reply, Request};
 
 /// The host-callback client — how a native extension calls BACK into the host's MCP surface.
 ///

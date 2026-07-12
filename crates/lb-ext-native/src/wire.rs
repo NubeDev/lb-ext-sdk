@@ -65,11 +65,44 @@ impl Reply {
     }
 }
 
-/// The `params` shape for a [`Method::Call`]: which tool and its opaque-JSON input.
+/// The `params` shape for a [`Method::Call`]: which tool, its opaque-JSON input, and — additively —
+/// **who** the host already authorized for this call ([`Caller`]).
+///
+/// `caller` is **additive-by-absence**: an old host omits it (`skip_serializing_if`), and a child
+/// built against an older SDK ignores an unknown field, so the frame stays backward compatible across
+/// a host/child version skew — the same rule the wasm SDK's additive fields use, and it needs NO
+/// [`crate::PROTOCOL_MAJOR`] bump. A child that reads `caller` can enforce per-caller row visibility
+/// (native-caller-identity scope); one that ignores it behaves exactly as before.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CallParams {
     pub tool: String,
     pub input: String,
+    /// A minimal, **non-replayable** projection of the principal the host authorized for this call.
+    /// `None` on an old-host frame (or a call with no resolvable caller). See [`Caller`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caller: Option<Caller>,
+}
+
+/// A minimal projection of the caller the host stamps into a [`CallParams`] frame
+/// (native-caller-identity scope). It is the *least* a per-caller row filter needs: **who** (`sub`),
+/// **which tenant** (`ws`), **role**, and a **delegation marker** (`delegated`).
+///
+/// **This is NOT a token.** It carries no signature the host gateway would accept for a *new* call,
+/// so an extension can never *act as* the caller against a third tool. Use it only to (1) attribute
+/// this extension's own row-filter decision to the caller and (2) name `sub` as the `subject` of a
+/// reach verb (`authz.check_scoped` / `authz.scope_filter`) this extension is *separately* granted to
+/// delegate (`mcp:authz.delegate_reach:call`). The projection alone confers nothing.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Caller {
+    /// The global identity the host authorized (`user:…` / `key:…` / `agent:…`).
+    pub sub: String,
+    /// The workspace the call is scoped to — the hard tenant wall.
+    pub ws: String,
+    /// The caller's role, lower-cased (`super-admin` / `workspace-admin` / `member`).
+    pub role: String,
+    /// True when the caller is itself a derived (on-behalf-of) principal.
+    #[serde(default)]
+    pub delegated: bool,
 }
 
 #[cfg(test)]
@@ -109,8 +142,52 @@ mod tests {
         let p = CallParams {
             tool: "ingest.write".into(),
             input: r#"{"n":1}"#.into(),
+            caller: None,
         };
         let back: CallParams = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
         assert_eq!(back, p);
+    }
+
+    #[test]
+    fn call_params_carries_caller_round_trip() {
+        let p = CallParams {
+            tool: "child.get".into(),
+            input: r#"{"id":"leo"}"#.into(),
+            caller: Some(Caller {
+                sub: "user:ana".into(),
+                ws: "acme".into(),
+                role: "member".into(),
+                delegated: false,
+            }),
+        };
+        let back: CallParams = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
+        assert_eq!(back, p);
+        assert_eq!(back.caller.unwrap().sub, "user:ana");
+    }
+
+    /// Backward compatibility: an OLD-host frame has no `caller` key at all. It must still
+    /// deserialize (→ `caller: None`), so a child on the new SDK talking to an old host is fine.
+    #[test]
+    fn old_frame_without_caller_deserializes_to_none() {
+        let old = r#"{"tool":"echo","input":"{}"}"#;
+        let params: CallParams = serde_json::from_str(old).unwrap();
+        assert_eq!(params.tool, "echo");
+        assert!(params.caller.is_none());
+    }
+
+    /// The absent-caller frame is byte-identical to the pre-`caller` wire (skip_serializing_if), so
+    /// an old host reading a new child's echoed shape sees no unexpected field.
+    #[test]
+    fn absent_caller_is_omitted_on_the_wire() {
+        let p = CallParams {
+            tool: "echo".into(),
+            input: "{}".into(),
+            caller: None,
+        };
+        let json = serde_json::to_string(&p).unwrap();
+        assert!(
+            !json.contains("caller"),
+            "absent caller must not serialize: {json}"
+        );
     }
 }
