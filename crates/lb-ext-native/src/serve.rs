@@ -19,7 +19,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::frame::{read_frame, write_frame};
 use crate::handshake::InitReply;
-use crate::wire::{CallParams, Method, Reply, Request};
+use crate::wire::{CallParams, Caller, Method, Reply, Request};
 
 /// What a native extension implements: the set of tools it serves and how to run one.
 ///
@@ -33,11 +33,37 @@ pub trait Tools: Send {
 
     /// Run `tool` with opaque-JSON `input`, returning opaque-JSON output or a human error string.
     /// `async` via the returned future; a tool that blocks should offload, not stall the wire.
+    ///
+    /// This is the caller-agnostic entry point. An extension that must enforce per-caller row
+    /// visibility overrides [`call_with_caller`](Tools::call_with_caller) instead — the default of
+    /// that method forwards here, so an extension that does NOT care about identity only implements
+    /// `call` and is unaffected by the additive `caller` frame field (native-caller-identity scope).
     fn call(
         &mut self,
         tool: &str,
         input: &str,
     ) -> impl std::future::Future<Output = Result<String, String>> + Send;
+
+    /// Run `tool` with `input`, given the authorized [`Caller`] the host stamped into the frame
+    /// (`None` on an old-host frame). Override this to enforce per-caller row visibility — attribute
+    /// the row filter to `caller.sub`, or name it as the `subject` of a delegated reach verb this
+    /// extension is granted to call (native-caller-identity scope).
+    ///
+    /// **Default:** ignore the caller and forward to [`call`](Tools::call). So the caller field is
+    /// purely opt-in: an identity-unaware extension needs no change, and a new SDK does not force a
+    /// behavioural change on an existing one. `Send` bound on the future matches `call`.
+    fn call_with_caller(
+        &mut self,
+        tool: &str,
+        input: &str,
+        caller: Option<Caller>,
+    ) -> impl std::future::Future<Output = Result<String, String>> + Send {
+        // `caller` intentionally unused in the default — an identity-unaware extension gets exactly
+        // the old behaviour. Named `_caller` bindings would break the override signature match, so we
+        // consume it explicitly to keep the parameter documented and warning-free.
+        let _ = &caller;
+        self.call(tool, input)
+    }
 }
 
 /// Serve the control wire on `reader`/`writer` until shutdown or EOF, dispatching to `tools`.
@@ -90,11 +116,15 @@ where
     }
 }
 
-/// Parse a `call`'s [`CallParams`] and dispatch it, mapping a parse failure to a child error string.
+/// Parse a `call`'s [`CallParams`] and dispatch it through [`Tools::call_with_caller`], mapping a
+/// parse failure to a child error string. `caller` is `None` on an old-host frame; the default of
+/// `call_with_caller` forwards to `call`, so a caller-unaware extension is unaffected.
 async fn dispatch_call<T: Tools>(tools: &mut T, params: &str) -> Result<String, String> {
     let call: CallParams =
         serde_json::from_str(params).map_err(|e| format!("bad call params: {e}"))?;
-    tools.call(&call.tool, &call.input).await
+    tools
+        .call_with_caller(&call.tool, &call.input, call.caller)
+        .await
 }
 
 /// Frame and write one reply.
@@ -178,6 +208,7 @@ mod tests {
         let params = serde_json::to_string(&CallParams {
             tool: "echo".into(),
             input: r#"{"hello":true}"#.into(),
+            caller: None,
         })
         .unwrap();
         let replies = round_trip(vec![Request {
@@ -190,11 +221,72 @@ mod tests {
         assert!(replies[0].error.is_none());
     }
 
+    /// An extension that overrides `call_with_caller` receives the frame caller and can act on it —
+    /// here it echoes the caller's `sub` (or `"anon"` when the frame carried none). Proves the caller
+    /// projection survives serialize → `serve` dispatch → the verb layer, in-process.
+    #[tokio::test]
+    async fn call_with_caller_delivers_the_frame_caller() {
+        struct WhoAmI;
+        impl Tools for WhoAmI {
+            fn tools(&self) -> Vec<String> {
+                vec!["whoami".into()]
+            }
+            async fn call(&mut self, _tool: &str, _input: &str) -> Result<String, String> {
+                Ok("\"anon\"".into())
+            }
+            async fn call_with_caller(
+                &mut self,
+                _tool: &str,
+                _input: &str,
+                caller: Option<Caller>,
+            ) -> Result<String, String> {
+                Ok(format!(
+                    "{:?}",
+                    caller.map(|c| c.sub).unwrap_or_else(|| "anon".into())
+                ))
+            }
+        }
+
+        let (host, child) = duplex(64 * 1024);
+        let (child_r, child_w) = tokio::io::split(child);
+        let server = tokio::spawn(async move { serve(child_r, child_w, WhoAmI).await });
+        let (mut host_r, mut host_w) = tokio::io::split(host);
+
+        let params = serde_json::to_string(&CallParams {
+            tool: "whoami".into(),
+            input: "{}".into(),
+            caller: Some(Caller {
+                sub: "user:ana".into(),
+                ws: "acme".into(),
+                role: "member".into(),
+                delegated: false,
+            }),
+        })
+        .unwrap();
+        let bytes = serde_json::to_vec(&Request {
+            id: 1,
+            method: Method::Call,
+            params,
+        })
+        .unwrap();
+        write_frame(&mut host_w, &bytes).await.unwrap();
+        let body = read_frame(&mut host_r).await.unwrap();
+        let reply: Reply = serde_json::from_slice(&body).unwrap();
+        assert!(
+            reply.result.as_deref().unwrap().contains("user:ana"),
+            "verb layer must see the frame caller: {reply:?}"
+        );
+        drop(host_w);
+        drop(host_r);
+        server.await.unwrap().unwrap();
+    }
+
     #[tokio::test]
     async fn unknown_tool_is_a_child_error() {
         let params = serde_json::to_string(&CallParams {
             tool: "nope".into(),
             input: "{}".into(),
+            caller: None,
         })
         .unwrap();
         let replies = round_trip(vec![Request {
@@ -228,6 +320,7 @@ mod tests {
         let call = serde_json::to_string(&CallParams {
             tool: "echo".into(),
             input: "42".into(),
+            caller: None,
         })
         .unwrap();
         let replies = round_trip(vec![
