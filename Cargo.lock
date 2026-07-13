@@ -386,14 +386,14 @@ dependencies = [
 
 [[package]]
 name = "lb-ext"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "lb-sdk",
 ]
 
 [[package]]
 name = "lb-ext-native"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "lb-sidecar-client",
  "serde",
@@ -403,11 +403,11 @@ dependencies = [
 
 [[package]]
 name = "lb-sdk"
-version = "0.4.0"
+version = "0.4.1"
 
 [[package]]
 name = "lb-sidecar-client"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "reqwest",
  "serde",

@@ -17,16 +17,16 @@ members = [
 ]
 
 [workspace.package]
-version = "0.4.0"
+version = "0.4.1"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 rust-version = "1.90"
 repository = "https://github.com/NubeDev/lb-ext-sdk"
 
 [workspace.dependencies]
-lb-sdk = { path = "crates/lb-sdk", version = "0.4.0" }
-lb-ext-native = { path = "crates/lb-ext-native", version = "0.4.0" }
-lb-sidecar-client = { path = "crates/lb-sidecar-client", version = "0.4.0" }
+lb-sdk = { path = "crates/lb-sdk", version = "0.4.1" }
+lb-ext-native = { path = "crates/lb-ext-native", version = "0.4.1" }
+lb-sidecar-client = { path = "crates/lb-sidecar-client", version = "0.4.1" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"

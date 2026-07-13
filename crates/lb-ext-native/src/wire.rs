@@ -103,6 +103,15 @@ pub struct Caller {
     /// True when the caller is itself a derived (on-behalf-of) principal.
     #[serde(default)]
     pub delegated: bool,
+    /// True when the host derived — from the caller's CAPS, not the cosmetic
+    /// `role` — that this caller holds workspace-admin authority. The
+    /// authoritative admin signal for a sidecar's row-filter bypass: `role` is
+    /// minted `member` for everyone (admin power rides caps), so a sidecar that
+    /// keyed admin off `role` would treat a real admin as a guardian. Host sets
+    /// it once via `caps_hold_admin`; an old host that never stamps it leaves
+    /// this `false` (fail-CLOSED — least privilege).
+    #[serde(default)]
+    pub admin: bool,
 }
 
 #[cfg(test)]
@@ -158,6 +167,7 @@ mod tests {
                 ws: "acme".into(),
                 role: "member".into(),
                 delegated: false,
+                admin: false,
             }),
         };
         let back: CallParams = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
@@ -188,6 +198,31 @@ mod tests {
         assert!(
             !json.contains("caller"),
             "absent caller must not serialize: {json}"
+        );
+    }
+
+    /// The admin marker is a safety signal (row-filter bypass): it must survive the wire as-set,
+    /// and — critically — an OLD-host caller projection that omits `admin` must deserialize
+    /// `admin: false` (fail-CLOSED: a stale host never accidentally grants admin power).
+    #[test]
+    fn caller_admin_round_trips_and_defaults_closed() {
+        let admin = Caller {
+            sub: "user:root".into(),
+            ws: "acme".into(),
+            role: "member".into(),
+            delegated: false,
+            admin: true,
+        };
+        let back: Caller = serde_json::from_str(&serde_json::to_string(&admin).unwrap()).unwrap();
+        assert_eq!(back, admin);
+        assert!(back.admin, "admin: true must round-trip through JSON");
+
+        // A projection stamped by an old host has no `admin` key at all → fail closed.
+        let old = r#"{"sub":"user:root","ws":"acme","role":"member","delegated":false}"#;
+        let legacy: Caller = serde_json::from_str(old).unwrap();
+        assert!(
+            !legacy.admin,
+            "a caller with no admin field must deserialize admin=false (fail closed)"
         );
     }
 }
