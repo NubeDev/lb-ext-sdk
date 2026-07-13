@@ -260,6 +260,7 @@ mod tests {
                 ws: "acme".into(),
                 role: "member".into(),
                 delegated: false,
+                admin: false,
             }),
         })
         .unwrap();
