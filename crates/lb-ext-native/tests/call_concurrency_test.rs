@@ -248,7 +248,10 @@ async fn shutdown_drains_calls_already_in_flight() {
         call.1.as_deref().unwrap().contains("slow"),
         "the drained call must carry its real result: {call:?}"
     );
-    assert!(seen.iter().any(|(id, _)| *id == 2), "shutdown must reply ok");
+    assert!(
+        seen.iter().any(|(id, _)| *id == 2),
+        "shutdown must reply ok"
+    );
 
     drop(host_w);
     drop(host_r);
@@ -323,7 +326,10 @@ async fn concurrency_is_bounded_and_nothing_is_rejected() {
 
     // Every call is the SLOW verb, so they genuinely pile up against the cap.
     const BURST: u64 = 20;
-    assert!(BURST as usize > MAX_INFLIGHT_CALLS, "burst must exceed the cap");
+    assert!(
+        BURST as usize > MAX_INFLIGHT_CALLS,
+        "burst must exceed the cap"
+    );
     for id in 0..BURST {
         write_frame(&mut host_w, &call_frame(id, "site.overview", "{}"))
             .await
@@ -333,7 +339,10 @@ async fn concurrency_is_bounded_and_nothing_is_rejected() {
     let mut ids = Vec::new();
     for _ in 0..BURST {
         let r: Reply = serde_json::from_slice(&read_frame(&mut host_r).await.unwrap()).unwrap();
-        assert!(r.error.is_none(), "the bound must queue, never reject: {r:?}");
+        assert!(
+            r.error.is_none(),
+            "the bound must queue, never reject: {r:?}"
+        );
         ids.push(r.id);
     }
 
