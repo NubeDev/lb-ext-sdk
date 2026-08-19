@@ -17,6 +17,7 @@
 
 use tokio::io::{AsyncRead, AsyncWrite};
 
+use crate::descriptor::ToolDescriptor;
 use crate::frame::{read_frame, write_frame};
 use crate::handshake::InitReply;
 use crate::wire::{CallParams, Caller, Method, Reply, Request};
@@ -43,6 +44,24 @@ pub trait Tools: Send {
         tool: &str,
         input: &str,
     ) -> impl std::future::Future<Output = Result<String, String>> + Send;
+
+    /// The self-declared contract for each tool — title, group, input JSON Schema, external-effect
+    /// flag — reported alongside [`tools`](Tools::tools) in the `init` handshake so the host's
+    /// `tools.catalog` can serve typed schemas instead of bare names.
+    ///
+    /// **Default:** one [`ToolDescriptor::name_only`] per entry in [`tools`](Tools::tools) — exactly
+    /// what the host synthesised on its own before the handshake could carry more, so an existing
+    /// extension recompiles against this SDK with no source change and no behaviour change.
+    ///
+    /// [`tools`](Tools::tools) remains the dispatch allowlist; overriding this only enriches. Derive
+    /// the schemas from the args structs the tool already parses via [`crate::schema_for`] (feature
+    /// `schemars`) so a declaration cannot drift from the parser.
+    fn descriptors(&self) -> Vec<ToolDescriptor> {
+        self.tools()
+            .into_iter()
+            .map(ToolDescriptor::name_only)
+            .collect()
+    }
 
     /// Run `tool` with `input`, given the authorized [`Caller`] the host stamped into the frame
     /// (`None` on an old-host frame). Override this to enforce per-caller row visibility — attribute
@@ -93,7 +112,16 @@ where
 
         match req.method {
             Method::Init => {
-                let init = InitReply::new(tools.tools());
+                // An extension that declares nothing yields the default `descriptors()` — one
+                // name-only entry per tool, which carries no more than `tools` already does. Omit it
+                // in that case so its frame is byte-identical to a pre-descriptor SDK's, and so
+                // "descriptors absent" keeps meaning "nothing declared" on the host side.
+                let descriptors = tools.descriptors();
+                let init = if descriptors.iter().all(ToolDescriptor::is_name_only) {
+                    InitReply::new(tools.tools())
+                } else {
+                    InitReply::with_descriptors(tools.tools(), descriptors)
+                };
                 let json = serde_json::to_string(&init).unwrap_or_else(|_| "{}".into());
                 reply(&mut writer, Reply::ok(req.id, json)).await?;
             }

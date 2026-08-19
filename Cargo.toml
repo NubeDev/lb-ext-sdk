@@ -29,6 +29,10 @@ lb-ext-native = { path = "crates/lb-ext-native", version = "0.4.1" }
 lb-sidecar-client = { path = "crates/lb-sidecar-client", version = "0.4.1" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Optional, behind lb-ext-native's `schemars` feature: generate a tool's declared input schema from
+# the same serde struct the tool parses, so the two cannot drift. Off by default — an extension that
+# hand-writes its schemas (or declares none) pays nothing for it.
+schemars = "1"
 thiserror = "2"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 tokio = { version = "1", default-features = false }
