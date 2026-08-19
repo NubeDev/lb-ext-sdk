@@ -16,7 +16,7 @@
 //! struct MyExt;
 //! impl Tools for MyExt {
 //!     fn tools(&self) -> Vec<String> { vec!["greet".into()] }
-//!     async fn call(&mut self, tool: &str, input: &str) -> Result<String, String> {
+//!     async fn call(&self, tool: &str, input: &str) -> Result<String, String> {
 //!         match tool {
 //!             "greet" => Ok(format!("{{\"hello\":{input}}}")),
 //!             other => Err(format!("unknown tool: {other}")),

@@ -15,7 +15,7 @@ impl Tools for Plain {
     fn tools(&self) -> Vec<String> {
         vec!["echo".into()]
     }
-    async fn call(&mut self, _tool: &str, input: &str) -> Result<String, String> {
+    async fn call(&self, _tool: &str, input: &str) -> Result<String, String> {
         Ok(input.to_string())
     }
 }
@@ -45,7 +45,7 @@ impl Tools for Declaring {
                 .emits_external(true),
         ]
     }
-    async fn call(&mut self, _tool: &str, _input: &str) -> Result<String, String> {
+    async fn call(&self, _tool: &str, _input: &str) -> Result<String, String> {
         Ok("null".into())
     }
 }
