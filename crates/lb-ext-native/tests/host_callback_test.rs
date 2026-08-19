@@ -74,7 +74,15 @@ async fn serve_once(
             .to_string();
         let authorization = lines
             .find(|l| l.to_ascii_lowercase().starts_with("authorization:"))
-            .map(|l| l.splitn(2, ':').nth(1).unwrap_or("").trim().to_string());
+            // `split_once` rather than `splitn`, per clippy — the `.trim()` is kept, since the
+            // header value carries the leading space after the colon.
+            .map(|l| {
+                l.split_once(':')
+                    .map(|(_, v)| v)
+                    .unwrap_or("")
+                    .trim()
+                    .to_string()
+            });
         let parsed: Value = serde_json::from_str(body.trim()).unwrap_or(Value::Null);
         {
             let mut c = cap.lock().await;

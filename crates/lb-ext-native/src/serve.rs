@@ -10,23 +10,67 @@
 //! - `call`     → parse [`CallParams`], dispatch [`Tools::call`], reply the tool's JSON or its error.
 //! - `shutdown` → reply `ok`, then return so the caller can drain and exit.
 //!
-//! The loop is deliberately sequential: the control line is low-rate request/reply (lb's supervisor
-//! writes one request and reads until the matching id — no pipelining), so a single reader keeps the
-//! wire correct without a background task to race. An extension that needs concurrency does it inside
-//! [`Tools::call`]; the wire stays one-at-a-time.
+//! **`call` fans out; the three control methods do not** (native-child-concurrency scope). The read
+//! loop spawns each `call` onto its own task and goes straight back to reading, so a multi-second
+//! verb no longer stalls every verb behind it. `init` / `health` / `shutdown` are answered on the
+//! loop itself, in order — `health` in particular must answer within the host's liveness window, and
+//! a health reply queued behind a slow call is read by the host as a **dead child**.
+//!
+//! This is safe because the host is already multiplexed. `lb-supervisor`'s `Conn` registers a waiter,
+//! holds its write lock for exactly one frame, and routes every reply back **by `id`** through a
+//! pending map — it pipelines by construction and never assumes reply order. (Verified against
+//! `lb/rust/crates/supervisor/src/conn.rs` before this change; if the host had assumed ordering, the
+//! fix would have had to change shape.) Out-of-order replies on this wire are therefore correct, not
+//! merely tolerated.
+//!
+//! Three invariants hold the concurrency together; each is a corruption or availability bug if
+//! broken:
+//!
+//! 1. **Exactly one writer.** Replies are funnelled through an mpsc channel to a single writer task,
+//!    so two handlers finishing at once cannot interleave the bytes of their frames. A frame is
+//!    written whole or not at all. (A `Mutex` over the write half would also serialise, but the
+//!    channel additionally decouples a slow host read from the handler that produced the reply.)
+//! 2. **Bounded concurrency.** A [`Semaphore`] caps calls in flight at [`MAX_INFLIGHT_CALLS`], so a
+//!    dashboard issuing twenty tiles at once cannot open twenty database pools. The permit is taken
+//!    **inside** the spawned task, so acquiring it never blocks the read loop — an extension at its
+//!    cap still answers `health` instantly and still accepts `shutdown`.
+//! 3. **`shutdown` drains, it does not cancel.** On `shutdown` the loop stops reading, waits for
+//!    every in-flight call to finish and its reply to be written, and only then returns. Cancelling
+//!    instead would drop work the host is still waiting on, which it would surface as a transport
+//!    error rather than a result.
+//!
+//! [`Tools`] is therefore shared by reference: `call` takes `&self`, and the trait requires `Sync`.
+//! An extension holding real mutable state uses interior mutability, which is the honest place for
+//! it — the wire should not be the thing serialising an extension's database queries.
+
+use std::sync::Arc;
 
 use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::sync::{mpsc, Semaphore};
 
+use crate::descriptor::ToolDescriptor;
 use crate::frame::{read_frame, write_frame};
 use crate::handshake::InitReply;
 use crate::wire::{CallParams, Caller, Method, Reply, Request};
 
-/// What a native extension implements: the set of tools it serves and how to run one.
-///
 /// The host addresses a tool by its bare name (the `<ext>.` prefix is stripped host-side before the
 /// `call` reaches the child), passes opaque-JSON `input`, and expects opaque-JSON back. An `Err` is
 /// surfaced to the host as the reply `error` (→ `SupervisorError::Child`), never a panic.
-pub trait Tools: Send {
+/// The most calls this crate will run at once against one extension.
+///
+/// **Why 8.** The bound exists so a page cannot convert its tile count into database load. The
+/// number is taken from the thing actually being protected: a customer connection's pool is built
+/// with `max_connections: 5` (`ros-core`'s `registry`), and a real page fans out to a handful of
+/// verbs across at most two or three connections. 8 keeps a normal dashboard entirely unqueued
+/// while capping a pathological caller well below the point where concurrent verbs would start
+/// contending for pool slots and turn a fast read back into a slow one.
+///
+/// It is a ceiling on *concurrency*, never on correctness: a call over the cap waits for a permit
+/// and is then served normally. Nothing is rejected, and `health` is never behind it.
+pub const MAX_INFLIGHT_CALLS: usize = 8;
+
+/// What a native extension implements. See the method docs; note `call` takes `&self`.
+pub trait Tools: Send + Sync + 'static {
     /// The tool names this extension serves. Reported in the `init` handshake so the host can reject
     /// an unknown-tool dispatch early. Order is not significant.
     fn tools(&self) -> Vec<String>;
@@ -38,11 +82,33 @@ pub trait Tools: Send {
     /// visibility overrides [`call_with_caller`](Tools::call_with_caller) instead — the default of
     /// that method forwards here, so an extension that does NOT care about identity only implements
     /// `call` and is unaffected by the additive `caller` frame field (native-caller-identity scope).
+    /// **Takes `&self`.** The serve loop runs several calls against one `Tools` at once, so a tool
+    /// that genuinely needs mutable state holds it behind interior mutability (a `Mutex`, an
+    /// atomic, a connection pool) rather than making the wire the thing that serialises it. Almost
+    /// every extension already only reads shared handles here, so this costs it nothing.
     fn call(
-        &mut self,
+        &self,
         tool: &str,
         input: &str,
     ) -> impl std::future::Future<Output = Result<String, String>> + Send;
+
+    /// The self-declared contract for each tool — title, group, input JSON Schema, external-effect
+    /// flag — reported alongside [`tools`](Tools::tools) in the `init` handshake so the host's
+    /// `tools.catalog` can serve typed schemas instead of bare names.
+    ///
+    /// **Default:** one [`ToolDescriptor::name_only`] per entry in [`tools`](Tools::tools) — exactly
+    /// what the host synthesised on its own before the handshake could carry more, so an existing
+    /// extension recompiles against this SDK with no source change and no behaviour change.
+    ///
+    /// [`tools`](Tools::tools) remains the dispatch allowlist; overriding this only enriches. Derive
+    /// the schemas from the args structs the tool already parses via [`crate::schema_for`] (feature
+    /// `schemars`) so a declaration cannot drift from the parser.
+    fn descriptors(&self) -> Vec<ToolDescriptor> {
+        self.tools()
+            .into_iter()
+            .map(ToolDescriptor::name_only)
+            .collect()
+    }
 
     /// Run `tool` with `input`, given the authorized [`Caller`] the host stamped into the frame
     /// (`None` on an old-host frame). Override this to enforce per-caller row visibility — attribute
@@ -53,7 +119,7 @@ pub trait Tools: Send {
     /// purely opt-in: an identity-unaware extension needs no change, and a new SDK does not force a
     /// behavioural change on an existing one. `Send` bound on the future matches `call`.
     fn call_with_caller(
-        &mut self,
+        &self,
         tool: &str,
         input: &str,
         caller: Option<Caller>,
@@ -68,69 +134,142 @@ pub trait Tools: Send {
 
 /// Serve the control wire on `reader`/`writer` until shutdown or EOF, dispatching to `tools`.
 ///
-/// Returns `Ok(())` on a clean `shutdown` or when the host closes the stream (EOF is the host going
-/// away — a normal stop, not an error). Returns `Err` only on a real I/O failure writing a reply.
-pub async fn serve<R, W, T>(mut reader: R, mut writer: W, mut tools: T) -> std::io::Result<()>
+/// `call` is spawned; `init` / `health` / `shutdown` are answered inline and stay ordered. Returns
+/// `Ok(())` on a clean `shutdown` (after draining in-flight calls) or when the host closes the
+/// stream (EOF is the host going away — a normal stop, not an error). Returns `Err` only on a real
+/// I/O failure writing a reply.
+pub async fn serve<R, W, T>(mut reader: R, writer: W, tools: T) -> std::io::Result<()>
 where
     R: AsyncRead + Unpin,
-    W: AsyncWrite + Unpin,
+    W: AsyncWrite + Unpin + Send + 'static,
     T: Tools,
 {
+    let tools = Arc::new(tools);
+    let limit = Arc::new(Semaphore::new(MAX_INFLIGHT_CALLS));
+
+    // Invariant 1: ONE writer. Every reply — spawned or inline — goes through this channel, so two
+    // handlers finishing at once can never interleave the bytes of their frames.
+    let (tx, mut rx) = mpsc::unbounded_channel::<Reply>();
+    let writer_task = tokio::spawn(async move {
+        let mut writer = writer;
+        while let Some(reply) = rx.recv().await {
+            let bytes = match serde_json::to_vec(&reply) {
+                Ok(b) => b,
+                // A reply we cannot even serialize has no useful frame; the id is still owed an
+                // answer, so send the failure rather than dropping the caller into a hang.
+                Err(e) => serde_json::to_vec(&Reply::err(reply.id, format!("bad reply json: {e}")))
+                    .unwrap_or_default(),
+            };
+            if bytes.is_empty() {
+                continue;
+            }
+            write_frame(&mut writer, &bytes).await?;
+        }
+        Ok(())
+    });
+
+    // Handles for in-flight calls, so `shutdown` can DRAIN rather than cancel (invariant 3).
+    let mut inflight: Vec<tokio::task::JoinHandle<()>> = Vec::new();
+
     loop {
+        // Reap finished handles so a long-lived extension does not accumulate them.
+        inflight.retain(|h| !h.is_finished());
+
         let body = match read_frame(&mut reader).await {
             Ok(b) => b,
             // EOF / closed stream: the host is gone. A clean stop, not a failure.
-            Err(_) => return Ok(()),
+            Err(_) => break,
         };
         let req: Request = match serde_json::from_slice(&body) {
             Ok(r) => r,
             Err(e) => {
                 // A frame we can't parse has no id to correlate; reply on id 0 and keep serving.
-                reply(&mut writer, Reply::err(0, format!("bad request json: {e}"))).await?;
+                let _ = tx.send(Reply::err(0, format!("bad request json: {e}")));
                 continue;
             }
         };
 
         match req.method {
             Method::Init => {
-                let init = InitReply::new(tools.tools());
+                // An extension that declares nothing yields the default `descriptors()` — one
+                // name-only entry per tool, which carries no more than `tools` already does. Omit it
+                // in that case so its frame is byte-identical to a pre-descriptor SDK's, and so
+                // "descriptors absent" keeps meaning "nothing declared" on the host side.
+                let descriptors = tools.descriptors();
+                let init = if descriptors.iter().all(ToolDescriptor::is_name_only) {
+                    InitReply::new(tools.tools())
+                } else {
+                    InitReply::with_descriptors(tools.tools(), descriptors)
+                };
                 let json = serde_json::to_string(&init).unwrap_or_else(|_| "{}".into());
-                reply(&mut writer, Reply::ok(req.id, json)).await?;
+                let _ = tx.send(Reply::ok(req.id, json));
             }
             Method::Health => {
-                reply(&mut writer, Reply::ok(req.id, "\"ok\"")).await?;
+                // Answered on the loop, so it is never queued behind a call. This is the whole
+                // reason only `call` fans out.
+                let _ = tx.send(Reply::ok(req.id, "\"ok\""));
             }
             Method::Call => {
-                let r = dispatch_call(&mut tools, &req.params).await;
-                let reply = match r {
-                    Ok(out) => Reply::ok(req.id, out),
-                    Err(msg) => Reply::err(req.id, msg),
-                };
-                self::reply(&mut writer, reply).await?;
+                // Spawn and go straight back to reading — the line does not wait for the handler.
+                let tools = Arc::clone(&tools);
+                let limit = Arc::clone(&limit);
+                let tx = tx.clone();
+                let id = req.id;
+                let params = req.params;
+                inflight.push(tokio::spawn(async move {
+                    // Invariant 2: the permit is acquired HERE, inside the task, never on the read
+                    // loop. At the cap, calls queue among themselves while the wire stays live.
+                    //
+                    // `acquire_owned` fails only if the semaphore is closed; it never is (the `Arc`
+                    // outlives every task), so treat that impossible case as "proceed unbounded"
+                    // rather than dropping a caller's reply and hanging it.
+                    let _permit = Semaphore::acquire_owned(limit).await.ok();
+                    let reply = match dispatch_call(&*tools, &params).await {
+                        Ok(out) => Reply::ok(id, out),
+                        Err(msg) => Reply::err(id, msg),
+                    };
+                    let _ = tx.send(reply);
+                }));
             }
             Method::Shutdown => {
-                reply(&mut writer, Reply::ok(req.id, "\"ok\"")).await?;
-                return Ok(());
+                // Drain, don't cancel. Every call already accepted is answered before we go, so a
+                // cooperative stop never silently discards work the host is waiting on. The
+                // shutdown reply is queued LAST so it cannot overtake a drained call's reply.
+                for handle in inflight.drain(..) {
+                    let _ = handle.await;
+                }
+                let _ = tx.send(Reply::ok(req.id, "\"ok\""));
+                break;
             }
         }
+    }
+
+    // EOF path: the host is gone, but a call it already accepted may still be running. Drain it for
+    // the same reason as shutdown — the handler may have side effects worth completing, and the
+    // reply is cheap to write into a closed pipe (the writer task surfaces that as its I/O error).
+    for handle in inflight.drain(..) {
+        let _ = handle.await;
+    }
+
+    // Dropping the last sender ends the writer task; awaiting it both flushes every queued reply
+    // and surfaces a genuine write failure, which is the only `Err` this function returns.
+    drop(tx);
+    match writer_task.await {
+        Ok(result) => result,
+        // The writer task itself panicked or was aborted — report it rather than claiming success.
+        Err(e) => Err(std::io::Error::other(format!("writer task failed: {e}"))),
     }
 }
 
 /// Parse a `call`'s [`CallParams`] and dispatch it through [`Tools::call_with_caller`], mapping a
 /// parse failure to a child error string. `caller` is `None` on an old-host frame; the default of
 /// `call_with_caller` forwards to `call`, so a caller-unaware extension is unaffected.
-async fn dispatch_call<T: Tools>(tools: &mut T, params: &str) -> Result<String, String> {
+async fn dispatch_call<T: Tools>(tools: &T, params: &str) -> Result<String, String> {
     let call: CallParams =
         serde_json::from_str(params).map_err(|e| format!("bad call params: {e}"))?;
     tools
         .call_with_caller(&call.tool, &call.input, call.caller)
         .await
-}
-
-/// Frame and write one reply.
-async fn reply<W: AsyncWrite + Unpin>(writer: &mut W, reply: Reply) -> std::io::Result<()> {
-    let bytes = serde_json::to_vec(&reply)?;
-    write_frame(writer, &bytes).await
 }
 
 #[cfg(test)]
@@ -145,7 +284,7 @@ mod tests {
         fn tools(&self) -> Vec<String> {
             vec!["echo".into()]
         }
-        async fn call(&mut self, tool: &str, input: &str) -> Result<String, String> {
+        async fn call(&self, tool: &str, input: &str) -> Result<String, String> {
             match tool {
                 "echo" => Ok(input.to_string()),
                 other => Err(format!("unknown tool: {other}")),
@@ -231,11 +370,11 @@ mod tests {
             fn tools(&self) -> Vec<String> {
                 vec!["whoami".into()]
             }
-            async fn call(&mut self, _tool: &str, _input: &str) -> Result<String, String> {
+            async fn call(&self, _tool: &str, _input: &str) -> Result<String, String> {
                 Ok("\"anon\"".into())
             }
             async fn call_with_caller(
-                &mut self,
+                &self,
                 _tool: &str,
                 _input: &str,
                 caller: Option<Caller>,

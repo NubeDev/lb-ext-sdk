@@ -14,8 +14,14 @@ rust-version.workspace = true
 repository.workspace = true
 description = "The child-side wire protocol + host callback for native Lazybones extensions."
 
+[features]
+# Derive a tool's declared `input_schema` from its own serde args struct (see src/schema.rs).
+# Opt-in so the default build keeps its current, tiny dependency tree.
+schemars = ["dep:schemars"]
+
 [dependencies]
 serde.workspace = true
+schemars = { workspace = true, optional = true }
 serde_json.workspace = true
 tokio = { workspace = true, features = ["io-std", "io-util", "rt", "macros"] }
 # The host-callback client, re-exported so a native extension carries a single platform dependency

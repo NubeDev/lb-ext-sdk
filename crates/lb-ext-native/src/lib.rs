@@ -16,7 +16,7 @@
 //! struct MyExt;
 //! impl Tools for MyExt {
 //!     fn tools(&self) -> Vec<String> { vec!["greet".into()] }
-//!     async fn call(&mut self, tool: &str, input: &str) -> Result<String, String> {
+//!     async fn call(&self, tool: &str, input: &str) -> Result<String, String> {
 //!         match tool {
 //!             "greet" => Ok(format!("{{\"hello\":{input}}}")),
 //!             other => Err(format!("unknown tool: {other}")),
@@ -33,13 +33,19 @@
 //! See lb's `docs/scope/extensions/ext-out-of-tree-scope.md` (the native tier) and
 //! `docs/scope/extensions/native-callback-transport-scope.md`.
 
+pub mod descriptor;
 pub mod frame;
 pub mod handshake;
+#[cfg(feature = "schemars")]
+pub mod schema;
 pub mod serve;
 pub mod stdio;
 pub mod wire;
 
+pub use descriptor::ToolDescriptor;
 pub use handshake::{InitReply, PROTOCOL_MAJOR};
+#[cfg(feature = "schemars")]
+pub use schema::schema_for;
 pub use serve::{serve, Tools};
 pub use stdio::serve_stdio;
 pub use wire::{CallParams, Caller, Method, Reply, Request};
