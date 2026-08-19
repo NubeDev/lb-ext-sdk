@@ -163,9 +163,7 @@ where
             if bytes.is_empty() {
                 continue;
             }
-            if let Err(e) = write_frame(&mut writer, &bytes).await {
-                return Err(e);
-            }
+            write_frame(&mut writer, &bytes).await?;
         }
         Ok(())
     });
